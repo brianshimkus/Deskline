@@ -7,7 +7,7 @@ from urllib.parse import quote
 
 import httpx
 
-from .knowledge import GREETING
+from .knowledge import GREETING, MENU, POLICIES
 from .storage import now
 
 
@@ -119,13 +119,59 @@ class Engine:
             "answer requested",
         ):
             if call["answered"]:
-                await self._finish(
-                    call,
-                    GREETING + "The Python connection is working. Goodbye.",
-                )
+                await self._menu(call, GREETING + MENU)
             elif call["phase"] == "new":
                 self.store.update(call["id"], phase="answer requested")
                 await self._command(call, "answer", {}, "answer")
+        elif kind == "call.gather.ended":
+            state = decode_state(payload.get("client_state"))
+            if (
+                call["phase"] != "menu"
+                or state.get("stage") != "menu"
+                or state.get("token") != call["token"]
+            ):
+                self.store.log(
+                    call["id"], "ignored", "Stale or unrelated keypad result"
+                )
+                return
+            status = payload.get("status")
+            if status in ("call_hangup", "cancelled", "cancelled_amd"):
+                return
+            digit = payload.get("digits", "")
+            if digit == "0":
+                await self._finish(call, "Thanks for trying Deskline. Goodbye.")
+            elif digit in POLICIES and status == "valid":
+                item = POLICIES[digit]
+                self.store.log(
+                    call["id"], "answer", f"{item['title']} · {item['source']}"
+                )
+                if call["turn"] >= 6:
+                    await self._finish(
+                        call,
+                        item["answer"]
+                        + " This demo has reached its menu limit. Goodbye.",
+                    )
+                else:
+                    await self._menu(call, item["answer"] + " " + MENU, failures=0)
+            else:
+                failures = call["failures"] + 1
+                self.store.log(
+                    call["id"],
+                    "recovery",
+                    "No input" if not digit else "Invalid selection",
+                )
+                if failures >= 2:
+                    await self._finish(
+                        call,
+                        "We could not get a menu selection. Please call again when you are ready. Goodbye.",
+                    )
+                else:
+                    prefix = (
+                        "I did not receive a keypress. "
+                        if not digit
+                        else "That selection is not available. "
+                    )
+                    await self._menu(call, prefix + MENU, failures=failures)
         elif kind == "call.speak.ended":
             state = decode_state(payload.get("client_state"))
             if (
